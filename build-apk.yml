@@ -1,0 +1,113 @@
+name: Build YouTube Live Monitor APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'kivy-app/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache git zip unzip wget \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake libffi-dev libssl-dev libltdl-dev
+
+      - name: Cache buildozer global dir (v5)
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-global-v5-${{ hashFiles('kivy-app/buildozer.spec') }}
+          restore-keys: buildozer-global-v5-
+
+      - name: Cache buildozer local dir (v5)
+        uses: actions/cache@v4
+        with:
+          path: kivy-app/.buildozer
+          key: buildozer-local-v5-${{ hashFiles('kivy-app/buildozer.spec') }}
+          restore-keys: buildozer-local-v5-
+
+      - name: Install Android cmdline-tools at ALL expected paths
+        run: |
+          set -e
+          SDK_DIR="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK_DIR"
+          # Force clean reinstall to fix any broken cached state
+          rm -rf "$SDK_DIR/cmdline-tools" "$SDK_DIR/tools"
+          mkdir -p "$SDK_DIR/cmdline-tools"
+          # Download and extract
+          cd /tmp
+          rm -rf ct-extract ct.zip
+          mkdir -p ct-extract
+          cd ct-extract
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O ct.zip
+          unzip -q ct.zip
+          # Now we have ./cmdline-tools/{bin,lib,source.properties,NOTICE.txt}
+
+          # 1. MODERN path: cmdline-tools/latest/bin/sdkmanager
+          mkdir -p "$SDK_DIR/cmdline-tools/latest"
+          cp -r cmdline-tools/* "$SDK_DIR/cmdline-tools/latest/"
+
+          # 2. LEGACY path: cmdline-tools/bin/sdkmanager
+          cp -r cmdline-tools/bin "$SDK_DIR/cmdline-tools/"
+          cp -r cmdline-tools/lib "$SDK_DIR/cmdline-tools/"
+
+          # 3. ANCIENT path: tools/bin/sdkmanager (what buildozer 1.5.0 wants)
+          mkdir -p "$SDK_DIR/tools"
+          cp -r cmdline-tools/* "$SDK_DIR/tools/"
+
+          # Verify all three paths
+          echo "=== Verifying installation ==="
+          ls -la "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          ls -la "$SDK_DIR/cmdline-tools/bin/sdkmanager"
+          ls -la "$SDK_DIR/tools/bin/sdkmanager"
+
+          # Accept all licenses
+          yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+          # Pre-install required components
+          "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;34.0.0" "platforms;android-34" || true
+
+      - name: Install buildozer (latest stable + Cython)
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install --upgrade Cython==0.29.36 virtualenv
+          pip install --upgrade buildozer
+
+      - name: Build APK
+        working-directory: kivy-app
+        env:
+          BUILDOZER_WARN_ON_ROOT: '0'
+          ANDROID_HOME: /home/runner/.buildozer/android/platform/android-sdk
+          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
+        run: yes | buildozer android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtubelivemonitor-debug-apk
+          path: kivy-app/bin/*.apk
+          if-no-files-found: error
